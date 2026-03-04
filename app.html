@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>info-fix</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen p-6">
+
+<div class="max-w-6xl mx-auto">
+  <header class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-black">Info Fix</h1>
+    <a href="index.html" class="text-sm text-slate-400 hover:text-white">← Back to Landing</a>
+  </header>
+
+  <!-- ===== App Controls ===== -->
+  <div class="grid md:grid-cols-3 gap-4 mb-6">
+    <select id="provider" class="p-3 rounded-xl bg-slate-900 border border-slate-800">
+      <option value="gemini">Gemini 2.5 Flash</option>
+      <option value="openai">ChatGPT (OpenAI)</option>
+    </select>
+    <input id="apiKey" type="password" placeholder="API Key" class="p-3 rounded-xl bg-slate-900 border border-slate-800"/>
+    <div class="grid grid-cols-3 gap-2">
+      <input id="titleSlider" type="number" value="70" min="30" max="150" class="p-3 rounded-xl bg-slate-900 border border-slate-800"/>
+      <input id="descSlider" type="number" value="30" min="10" max="120" class="p-3 rounded-xl bg-slate-900 border border-slate-800"/>
+      <input id="kwSlider" type="number" value="25" min="5" max="50" class="p-3 rounded-xl bg-slate-900 border border-slate-800"/>
+    </div>
+  </div>
+
+  <!-- Dropzone -->
+  <div id="dropzone" class="border-2 border-dashed border-slate-700 rounded-2xl p-10 text-center mb-4 hover:border-indigo-500 transition cursor-pointer">
+    Drag & Drop PNG/JPEG images here or click to select
+    <input id="imageInput" type="file" multiple accept="image/png, image/jpeg" class="hidden"/>
+  </div>
+
+  <button id="startBtn" class="w-full py-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 font-bold transition mb-4">
+    Generate Metadata
+  </button>
+
+  <!-- Progress -->
+  <div class="w-full bg-slate-800 rounded-full h-3 mb-4">
+    <div id="progressBar" class="h-full bg-emerald-500 w-0 transition-all"></div>
+  </div>
+
+  <!-- Results Table -->
+  <div class="overflow-x-auto bg-slate-900 rounded-2xl border border-slate-800">
+    <table class="w-full text-sm">
+      <thead class="bg-slate-800">
+        <tr>
+          <th class="p-3">Filename</th>
+          <th class="p-3">Title</th>
+          <th class="p-3">Description</th>
+          <th class="p-3">Keywords</th>
+          <th class="p-3">Status</th>
+        </tr>
+      </thead>
+      <tbody id="resultsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="flex gap-3 mt-4">
+    <button id="previewCsvBtn" class="px-5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700">Preview CSV</button>
+    <button id="downloadCsvBtn" class="px-5 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 font-bold">Download CSV</button>
+  </div>
+</div>
+
+<!-- CSV Preview Modal -->
+<div id="csvModal" class="fixed inset-0 bg-black/60 hidden items-center justify-center p-6">
+  <div class="bg-slate-900 rounded-2xl max-w-4xl w-full p-6">
+    <h3 class="text-xl font-bold mb-4">CSV Preview</h3>
+    <pre id="csvPreview" class="text-xs bg-slate-950 p-4 rounded-xl max-h-[60vh] overflow-auto"></pre>
+    <div class="text-right mt-4">
+      <button onclick="csvModal.classList.add('hidden')" class="px-4 py-2 rounded-lg bg-slate-700">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const imageInput = document.getElementById('imageInput');
+const startBtn = document.getElementById('startBtn');
+const resultsBody = document.getElementById('resultsBody');
+const progressBar = document.getElementById('progressBar');
+const previewCsvBtn = document.getElementById('previewCsvBtn');
+const downloadCsvBtn = document.getElementById('downloadCsvBtn');
+const csvModal = document.getElementById('csvModal');
+const csvPreview = document.getElementById('csvPreview');
+
+let results = [];
+
+dropzone.onclick = () => imageInput.click();
+dropzone.ondragover = e => { e.preventDefault(); dropzone.classList.add('border-indigo-500'); };
+dropzone.ondragleave = () => dropzone.classList.remove('border-indigo-500');
+dropzone.ondrop = e => {
+  e.preventDefault();
+  dropzone.classList.remove('border-indigo-500');
+  imageInput.files = e.dataTransfer.files;
+};
+
+function toBase64(file){
+  return new Promise((res, rej)=>{
+    const r = new FileReader();
+    r.onload = ()=>res(r.result.split(',')[1]);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+
+function normalizeKeywords(keywords, target){
+  let arr = keywords.split(',').map(s=>s.trim()).filter(Boolean);
+  if(arr.length > target) arr = arr.slice(0, target);
+  while(arr.length < target) arr.push("stock photo");
+  return arr.join(', ');
+}
+
+function normalizeDescription(desc, target){
+  let w = desc.split(/\s+/).filter(Boolean);
+  if(w.length > target) w = w.slice(0, target);
+  while(w.length < target) w.push("image");
+  return w.join(" ");
+}
+
+startBtn.onclick = async ()=>{
+  results = [];
+  resultsBody.innerHTML = "";
+  progressBar.style.width = "0%";
+
+  const files = [...imageInput.files];
+  if(!files.length) return alert("Please select PNG/JPEG images first");
+
+  const provider = document.getElementById('provider').value;
+  const apiKey = document.getElementById('apiKey').value;
+  const titleLen = +document.getElementById('titleSlider').value;
+  const descLen = +document.getElementById('descSlider').value;
+  const kwCount = +document.getElementById('kwSlider').value;
+
+  let done = 0;
+
+  for(const file of files){
+    const row = document.createElement('tr');
+    row.innerHTML = `<td class="p-3">${file.name}</td>
+                     <td class="p-3"></td>
+                     <td class="p-3"></td>
+                     <td class="p-3"></td>
+                     <td class="p-3 text-yellow-400">Processing...</td>`;
+    resultsBody.appendChild(row);
+
+    try{
+      const base64 = await toBase64(file);
+      let meta;
+
+      if(provider === "gemini"){
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,{
+          method:"POST",
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            contents:[{parts:[
+              {text:`Return ONLY valid JSON:
+"title": close to ${titleLen} chars,
+"description": EXACTLY ${descLen} words,
+"keywords": EXACTLY ${kwCount} comma-separated keywords.`},
+              {inlineData:{mimeType:file.type,data:base64}}
+            ]}]
+          })
+        });
+        const j = await res.json();
+        let t = j.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        t = t.replace(/```json|```/g,"").trim();
+        meta = JSON.parse(t);
+      } else {
+        const res = await fetch("https://api.openai.com/v1/chat/completions",{
+          method:"POST",
+          headers:{
+            "Content-Type":"application/json",
+            "Authorization":"Bearer "+apiKey
+          },
+          body: JSON.stringify({
+            model:"gpt-4.1-mini",
+            messages:[{role:"user",content:`Return ONLY valid JSON:
+"title": close to ${titleLen} chars,
+"description": EXACTLY ${descLen} words,
+"keywords": EXACTLY ${kwCount} comma-separated keywords.`}]
+          })
+        });
+        const j = await res.json();
+        meta = JSON.parse(j.choices?.[0]?.message?.content || "{}");
+      }
+
+      meta.keywords = normalizeKeywords(meta.keywords || "", kwCount);
+      meta.description = normalizeDescription(meta.description || "", descLen);
+
+      row.children[1].innerText = meta.title || "";
+      row.children[2].innerText = meta.description || "";
+      row.children[3].innerText = meta.keywords || "";
+      row.children[4].innerText = "Done";
+      row.children[4].className = "p-3 text-emerald-400";
+
+      results.push({
+        filename: file.name,
+        title: meta.title || "",
+        description: meta.description || "",
+        keywords: meta.keywords || ""
+      });
+
+    }catch(e){
+      row.children[4].innerText = "Failed";
+      row.children[4].className = "p-3 text-red-400";
+      console.error(e);
+    }
+
+    done++;
+    progressBar.style.width = Math.round(done/files.length*100) + "%";
+  }
+};
+
+function buildCSV(){
+  let csv = "Filename,Title,Description,Keywords\n";
+  results.forEach(r=>{
+    csv += `"${(r.filename||"").replace(/"/g,'""')}","${(r.title||"").replace(/"/g,'""')}","${(r.description||"").replace(/"/g,'""')}","${(r.keywords||"").replace(/"/g,'""')}"\n`;
+  });
+  return csv;
+}
+
+previewCsvBtn.onclick = ()=>{
+  const csv = buildCSV();
+  csvPreview.textContent = csv;
+  csvModal.classList.remove('hidden');
+  csvModal.classList.add('flex');
+};
+
+downloadCsvBtn.onclick = ()=>{
+  const csv = buildCSV();
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = "info-fix-metadata.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+};
+</script>
+</body>
+</html>
